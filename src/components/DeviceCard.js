@@ -2,18 +2,25 @@ import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 
 /**
- * DeviceCard — BUG: Not memoized
- *
- * This component re-renders on every parent render because:
- * 1. onPress is a new function reference each time (created in parent without useCallback)
- * 2. React.memo is not applied
- *
- * Fix: wrap with React.memo and a custom comparison function.
- * A naive React.memo wrapping won't help if the parent doesn't stabilize the onPress callback.
- *
- * Note: don't just memo everything — understand WHY this one needs it and what the
- * comparison function should check.
+ * DeviceCard — memoized with a custom comparator that checks only rendered
+ * device fields + onPress identity. Parent must provide a stable onPress
+ * (useCallback) for the memo to be effective.
  */
+
+/** Device fields used in this component: id, status, lastSeen, name, type, location, battery */
+function isDeviceEqual(prevDevice, nextDevice) {
+  if (prevDevice === nextDevice) return true;
+  if (!prevDevice || !nextDevice) return false;
+  return (
+    prevDevice.id === nextDevice.id &&
+    prevDevice.status === nextDevice.status &&
+    prevDevice.lastSeen === nextDevice.lastSeen &&
+    prevDevice.name === nextDevice.name &&
+    prevDevice.type === nextDevice.type &&
+    prevDevice.location === nextDevice.location &&
+    prevDevice.battery === nextDevice.battery
+  );
+}
 
 const STATUS_CONFIG = {
   online: { color: '#22C55E', label: 'Online' },
@@ -68,9 +75,14 @@ function DeviceCard({ device, onPress }) {
   );
 }
 
-// Intentionally NOT exported as memo — this is the bug.
-// Fix: export default React.memo(DeviceCard, /* custom comparison */);
-export default DeviceCard;
+// Memoized DeviceCard — re-render only when device or onPress props change
+export default React.memo(DeviceCard, (prevProps, nextProps) => {
+  // Return true if props are equal (no re-render), false if they differ (re-render)
+  return (
+    isDeviceEqual(prevProps.device, nextProps.device) &&
+    prevProps.onPress === nextProps.onPress
+  );
+});
 
 const styles = StyleSheet.create({
   card: {

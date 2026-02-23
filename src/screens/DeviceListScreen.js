@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   FlatList,
@@ -17,57 +17,97 @@ import SyncStatus from '../components/SyncStatus';
 /**
  * DeviceListScreen
  *
- * BUGS in this file:
+ * Displays list of IoT devices with offline-first caching and background sync.
  *
- * Bug 1 — Excessive re-renders:
- *   - useFocusEffect triggers fetchDevices on every focus event (no throttle)
- *   - onPress callback is recreated on every render (no useCallback)
- *   - Combined with unmemoized DeviceCard, this causes full list re-renders on tab switch
- *
- * Bug 2 — Pull-to-refresh stale state:
- *   - handleRefresh calls fetchDevices() but doesn't await it correctly
- *   - refreshing is set to false immediately, before fetch completes
- *   - List doesn't update after pull-to-refresh
- *
- * See BRIEF.md for full spec.
+ * Features:
+ * 1. Proper pull-to-refresh that awaits the fetch
+ * 2. Throttled focus-based fetch (no refetch within 30 seconds)
+ * 3. Memoized onPress callback
+ * 4. Integrated SyncStatus indicator
+ * 5. Graceful offline handling with cached data
  */
 export default function DeviceListScreen({ navigation }) {
-  const { devices, isLoading, error, fetchDevices } = useDevices();
+  const {
+    devices,
+    isLoading,
+    isSyncing,
+    error,
+    syncStatus,
+    lastSyncedAt,
+    isStaleCacheOnError,
+    fetchDevices,
+    refresh,
+  } = useDevices();
   const [refreshing, setRefreshing] = useState(false);
 
-  // BUG: This runs fetchDevices on EVERY focus event — tab switches, back navigation, etc.
-  // No throttle, no tracking of when we last fetched.
-  // Fix: track lastFetchedAt, skip if < 30 seconds ago.
+  // Track last focus time to implement throttle
+  const lastFocusTimeRef = useRef(Date.now());
+  const FOCUS_THROTTLE_MS = 30 * 1000; // 30 seconds
+
+  // Wire up focus event with throttle
   useFocusEffect(
     useCallback(() => {
-      fetchDevices();
+      const now = Date.now();
+      if (now - lastFocusTimeRef.current > FOCUS_THROTTLE_MS) {
+        lastFocusTimeRef.current = now;
+        fetchDevices();
+      }
     }, [fetchDevices])
   );
 
-  // BUG: This doesn't work.
-  // fetchDevices() is called but not awaited — setRefreshing(false) runs immediately.
-  // The list state updates from fetchDevices don't arrive until after refreshing is already false.
-  const handleRefresh = () => {
+  // Handle pull-to-refresh — properly await the refresh
+  const handleRefresh = useCallback(async () => {
     setRefreshing(true);
-    fetchDevices(); // ← should be awaited, and should force-bypass throttle
-    setRefreshing(false);
-  };
+    try {
+      await refresh();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refresh]);
 
-  // BUG: This callback is recreated on every render.
-  // Every DeviceCard receives a new onPress reference, causing unnecessary re-renders.
-  const handleDevicePress = (device) => {
-    navigation.navigate('DeviceDetail', { deviceId: device.id });
-  };
+  // Memoized callback — stable reference, no unnecessary re-renders of DeviceCard
+  const handleDevicePress = useCallback(
+    (device) => {
+      navigation.navigate('DeviceDetail', { deviceId: device.id });
+    },
+    [navigation]
+  );
 
-  const renderItem = ({ item }) => (
-    <DeviceCard
-      device={item}
-      onPress={handleDevicePress}
-    />
+  const renderItem = useCallback(
+    ({ item }) => <DeviceCard device={item} onPress={handleDevicePress} />,
+    [handleDevicePress]
+  );
+
+  // ListHeaderComponent must be useCallback reference, not inline JSX
+  const renderListHeader = useCallback(
+    () => (
+      <SyncStatus
+        status={syncStatus}
+        lastSyncedAt={lastSyncedAt}
+        onRetry={refresh}
+        isStale={isStaleCacheOnError && syncStatus === 'error'}
+      />
+    ),
+    [syncStatus, lastSyncedAt, refresh, isStaleCacheOnError]
+  );
+
+  // ListEmptyComponent must be useCallback reference, not inline JSX
+  const renderEmptyComponent = useCallback(
+    () => (
+      <EmptyState
+        message={
+          devices.length === 0 && syncStatus === 'offline'
+            ? "You're offline and there's no cached data"
+            : 'No devices found'
+        }
+      />
+    ),
+    [devices.length, syncStatus]
   );
 
   const keyExtractor = (item) => item.id;
 
+  // First load with no cache — show full-screen loading
   if (isLoading && devices.length === 0) {
     return (
       <View style={styles.centered}>
@@ -79,21 +119,19 @@ export default function DeviceListScreen({ navigation }) {
 
   return (
     <View style={styles.container}>
-      {error && (
-        <ErrorBanner message={error} onRetry={fetchDevices} />
+      {error && !isSyncing && (
+        <ErrorBanner message={error} onRetry={refresh} />
       )}
-
-      {/* SyncStatus component — wire this up as part of the offline-first feature */}
-      {/* <SyncStatus status="syncing" lastSyncedAt={null} onRetry={fetchDevices} /> */}
 
       <FlatList
         data={devices}
         renderItem={renderItem}
         keyExtractor={keyExtractor}
-        contentContainerStyle={devices.length === 0 ? styles.emptyContainer : styles.listContent}
-        ListEmptyComponent={
-          <EmptyState message="No devices found" />
+        contentContainerStyle={
+          devices.length === 0 ? styles.emptyContainer : styles.listContent
         }
+        ListHeaderComponent={renderListHeader}
+        ListEmptyComponent={renderEmptyComponent}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
